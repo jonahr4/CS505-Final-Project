@@ -1,0 +1,42 @@
+# Environment — NEVER commit real API keys
+.env
+.env.local
+
+# Virtual environment
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+
+# Data — fully excluded from the repo. Regenerate with the scripts.
+data/
+
+# Results/metrics artifacts — excluded per decision to keep repo lean.
+# Numbers are summarized in README.md.
+results/
+
+# IDE / OS / tooling
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.claude/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+/tmp/*.log
+
+# Large model artifacts
+*.pt
+*.pkl
+*.joblib
