@@ -18,9 +18,13 @@ __pycache__/
 # Data — fully excluded from the repo. Regenerate with the scripts.
 data/
 
-# Results/metrics artifacts — excluded per decision to keep repo lean.
-# Numbers are summarized in README.md.
+# Results/metrics artifacts — excluded.
 results/
+
+# Figures and PDF reports — local-only artifacts, regeneratable.
+report_figures/
+*.pdf
+midterm_report.html
 
 # IDE / OS / tooling
 .vscode/

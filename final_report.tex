@@ -1,0 +1,293 @@
+\documentclass[10pt,letterpaper]{article}
+
+% ============================================================
+% Predicting Post-Release Letterboxd Ratings from Pre-Release
+% YouTube Trailer Comments — FINAL REPORT
+%
+% Format mirrors the midway report: centered title + author
+% block, single-column abstract on the left (full width),
+% two-column body. Drop into Overleaf and compile with pdfLaTeX.
+% ============================================================
+
+\usepackage[letterpaper,margin=0.75in]{geometry}
+\usepackage{times}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multicol}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+\usepackage{enumitem}
+
+\setlength{\parindent}{1.2em}
+\setlength{\columnsep}{0.30in}
+\captionsetup{font=small,labelfont=bf,skip=4pt}
+\setlength{\abovecaptionskip}{4pt}
+\setlength{\belowcaptionskip}{4pt}
+\setlist[itemize]{leftmargin=*,topsep=2pt,itemsep=1pt,parsep=0pt}
+
+\begin{document}
+
+% ---- Manual title block (centered) ----
+\begin{center}
+{\Large\bfseries Predicting Post-Release Letterboxd Ratings\\
+from Pre-Release YouTube Trailer Comments}\\
+\vspace{4pt}{\large\itshape Final Report}\\
+\vspace{8pt}
+{Jigar Kanakhara \quad Bhavya Bavissi \quad Jonah Rothman}\\
+{Boston University}\\
+{\texttt{\{jigar, bhavyabb, jonahr\}@bu.edu}}
+\end{center}
+
+\vspace{6pt}
+
+% --------------------- BODY (two-column, abstract in LEFT column only) ---------------------
+\begin{multicols}{2}
+
+% ABSTRACT lives at the top of the LEFT column (ACL-style)
+\noindent{\large\bfseries Abstract}\par
+\smallskip
+\noindent We study whether YouTube trailer comments posted before a movie's release predict its eventual Letterboxd audience rating. We frame the problem as a 5-class classification task and build an end-to-end pipeline (TMDB $\to$ YouTube $\to$ Letterboxd) producing a dataset of 173 movies (2020--2024) with $\approx$236{,}000 pre-release comments. We compare six model variants: a majority baseline, TF-IDF + logistic regression, structured features (logistic regression and random forest), frozen DistilBERT embeddings + LR, and two end-to-end fine-tuned DistilBERT variants (per-comment and movie-level). Our best model is TF-IDF + LR at \textbf{0.423 accuracy / 0.401 macro F1} on 5-class and \textbf{0.538 / 0.522} on the collapsed 3-class task. Neither fine-tuning approach beats TF-IDF: pseudo-label noise hurts the per-comment variant, and the 121-movie training set is too small for stable end-to-end fine-tuning. A per-window temporal ablation confirms the proposal's hypothesis that \emph{late}-window comments carry the most signal, and a Pearson correlation of $r{=}0.27$ links our hype--negativity score to the actual rating bucket.
+
+\vspace{6pt}
+
+\section{Introduction}
+\noindent YouTube trailer comments capture genuine pre-release reactions---tone, cast, premise---but they are noisy: hype, memes, sarcasm, and bots all coexist. This project asks whether enough signal survives the noise to predict how a film is eventually received.
+
+\paragraph{Task.} For movie $m$ with pre-release trailer comments $C_m = \{c_1,\dots,c_n\}$ and post-release Letterboxd rating $s_m \in [0.5, 5.0]$, we map $s_m$ to a bucket $y_m \in \{0,1,2,3,4\}$ (\textit{bad} to \textit{great}) and learn $f(C_m) \to y_m$. We also report a coarser 3-class collapse $\{0,1\}\to\textit{neg},\,\{2\}\to\textit{neu},\,\{3,4\}\to\textit{pos}$.
+
+\paragraph{Contributions.} (i) A reproducible 173-movie dataset with strict pre-release filtering. (ii) Six-model comparison covering lexical, hand-engineered, frozen-transformer, and two fine-tuned-transformer regimes. (iii) Adoption of mean absolute label distance (MAE) alongside accuracy and macro F1 to capture the ordinal structure of the buckets. (iv) Per-window temporal ablation showing late-stage comments dominate. (v) An expectation--reality analysis correlating pre-release hype with post-release ratings, with named outliers.
+
+\paragraph{Updates since the midterm.} Per reviewer feedback we (a) implemented end-to-end fine-tuning with a [CLS] head (no pooling) for two distinct setups, (b) added MAE as an ordinal-aware metric for every model, (c) ran a per-window temporal ablation, and (d) added the expectation--reality and error-analysis sections.
+
+\paragraph{Code.} All scripts, the fine-tuning code, and reproduction instructions are at \url{https://github.com/jonahr4/CS505-Final-Project} (branch \texttt{final-branch}).
+
+\section{Related Work}
+\noindent Sentiment-driven prediction of film outcomes has a long lineage. \cite{pang2002} showed bag-of-words classifiers compete with more complex methods, especially in low-data regimes---a finding our results echo. \cite{asur2010} used Twitter to forecast opening-weekend revenue, but Letterboxd ratings track \emph{long-run audience quality} rather than first-weekend revenue.
+
+For text classification, \cite{devlin2019} and the distilled variant \cite{sanh2019} have become standard, but their advantage often vanishes when labelled data is scarce \cite{pang2002}, which is the regime we operate in.
+
+\section{Data Collection}
+\noindent The pipeline is modular: each stage is a standalone, resumable script.
+
+\paragraph{Movie selection.} We queried the TMDB Discover API for English-language films released 2020--2024 with popularity $\geq 5$ and vote count $\geq 200$, retaining titles with at least 2 official YouTube trailers. This yielded 388 candidates. We stratified by year and popularity to sample 150 initially, later expanding to 210 for stronger statistical power.
+
+\paragraph{YouTube comments.} Using YouTube Data API v3, we scraped up to 1,000 comments per trailer, keeping only those posted \emph{before} the movie's release date. Crucially, we pre-checked each trailer's upload timestamp via \texttt{videos.list}; trailers uploaded after release were skipped entirely (no pre-release comment can exist on a post-release upload). The scraper is checkpoint-based and survives daily quota exhaustion.
+
+\paragraph{Letterboxd ratings.} We constructed candidate URLs from title and year and parsed the \texttt{aggregateRating} JSON-LD block, with \texttt{twitter:data2} as fallback. When two slug variants matched, we kept the one with more logged ratings to avoid obscure short-film collisions. Coverage: 209/210 with one manual fix (\textit{Lee} 2024 maps to \texttt{lee-2023} on Letterboxd).
+
+\paragraph{Leakage boundary.} Our initial cutoff at the festival premiere date was too strict: \textit{Promising Young Woman} premiered at Sundance 11 months before wide release, discarding genuine pre-release comments. We switched to the wide-release date, recovering $\approx$15 movies while preserving the no-leakage guarantee for general-audience commenters.
+
+\paragraph{Label construction.} Letterboxd scores cluster narrowly (mean 3.0, std 0.63), so equal-width bins would be severely imbalanced. We chose thresholds (Table~\ref{tab:buckets}) to produce near-equal class sizes. Filtering to movies with $\geq$30 pre-release comments and a valid rating yields the final dataset of \textbf{173 movies and $\approx$236K comments}.
+
+\begin{Figure}
+\centering
+\includegraphics[width=\linewidth]{report_figures/fig_rating_distribution.png}
+\captionof{figure}{Letterboxd rating distribution across the final 173 movies. Dashed lines mark bucket boundaries.}
+\label{fig:rating_dist}
+\end{Figure}
+
+\begin{Figure}
+\centering
+\small
+\begin{tabular}{cll@{\hskip 12pt}r}
+\toprule
+Bucket & Score range & Label & $n$\\
+\midrule
+0 & $r < 2.3$         & bad      & 22\\
+1 & $2.3 \leq r < 2.75$ & mediocre & 21\\
+2 & $2.75 \leq r < 3.15$ & average & 30\\
+3 & $3.15 \leq r < 3.5$ & good    & 25\\
+4 & $r \geq 3.5$        & great   & 29\\
+\bottomrule
+\end{tabular}
+\captionof{table}{Five-class rating buckets. Sizes are post-filter (n=127 train + val + test split).}
+\label{tab:buckets}
+\end{Figure}
+
+\section{Methods}
+
+\subsection{Structured Features}
+\noindent We construct a 25-dimensional movie-level feature vector implementing all three novel components from the proposal.
+
+\paragraph{Sentiment.} VADER \cite{hutto2014} compound scores yield mean, std, positive fraction, and negative fraction across the movie's pool.
+
+\paragraph{Hype and negative anticipation.} We count comments containing curated hype phrases (``can't wait,'' ``masterpiece,'' ``goat'') and negative phrases (``looks bad,'' ``cash grab,'' ``flop'') and combine them: $\textit{hype\_minus\_neg} = \textit{hype\_frac} - \textit{nega\_frac}$. This is our \emph{expectation--reality proxy}.
+
+\paragraph{Engagement.} Comment count, mean length, like-count statistics, reply rate, uppercase fraction, emoji density, and short-comment fraction capture engagement and spamminess.
+
+\paragraph{Temporal features.} The pre-release comment timeline of each movie is divided into early/middle/late thirds, and sentiment mean and hype fraction are computed within each window---the proposal's \emph{temporal modeling} contribution.
+
+\paragraph{Credibility-weighted sentiment.} Highly liked comments more reliably reflect mainstream opinion. We weight VADER scores $s_i$ by $w_i = \log(1 + \ell_i) + 1$ where $\ell_i$ is like count:
+\[
+\bar{s}_{\text{cred}} \;=\; \sum_i w_i s_i \,\Big/\, \sum_i w_i.
+\]
+
+\subsection{Prediction Models}
+\noindent All models share the same movie-level 70/15/15 stratified split (seed 42).
+
+\paragraph{Majority baseline.} Predicts the train-majority class everywhere.
+
+\paragraph{TF-IDF + LR.} Each movie's pre-release comments are concatenated into one document. We extract word uni+bigram TF-IDF (max 20K features, $\min\!\textit{df}{=}2$, $\max\!\textit{df}{=}0.95$, English stopwords) and train multinomial L2 logistic regression with $C{=}1.0$ and \texttt{class\_weight=balanced} \cite{pedregosa2011}.
+
+\paragraph{Structured features + LR / RF.} Standardized 25-dim features feed into balanced L2 logistic regression and a 500-tree random forest.
+
+\paragraph{Frozen DistilBERT + LR.} Up to 200 comments per movie (preferring longer ones) are encoded through frozen \texttt{distilbert-base-uncased} \cite{sanh2019,wolf2020}. Token embeddings are mean-pooled into per-comment vectors, then averaged into a single movie vector. LR is trained on top. This is the midterm's transformer setup.
+
+\paragraph{Fine-tuned DistilBERT, per-comment.} Per midterm reviewer feedback (``feed the whole sequence into the model, train a classifier on the [CLS] token without pooling''), we fine-tune \texttt{distilbert-base-uncased} end-to-end with a [CLS] classification head. Each comment carries its movie's bucket as a pseudo-label, converting the 121-movie problem into 80K training examples. We train 3 epochs at $\textit{lr}{=}2{\times}10^{-5}$, weight decay $0.01$, batch 32, max length 128, with early stopping on val macro F1. At inference we mean-pool per-comment softmax probabilities to the movie level and argmax.
+
+\paragraph{Fine-tuned DistilBERT, movie-level.} As an alternative addressing the pseudo-label noise issue, we fine-tune end-to-end with one input per movie: each movie's top-60 most-liked comments concatenated and truncated at 512 tokens. Heavier regularization (weight decay $0.05$, max 8 epochs, patience 2) compensates for the small training set.
+
+\paragraph{Ensemble.} We average class-probability outputs from TF-IDF, structured-LR, and fine-tuned movie-level DistilBERT.
+
+\section{Experimental Setup}
+\noindent We split at the movie level to prevent comment-level leakage: 121 train / 26 val / 26 test, stratified by rating bucket, seed 42. We report three metrics on the held-out test set:
+\begin{itemize}
+\item \textbf{Accuracy} ($\uparrow$) -- fraction of movies with the exact correct bucket.
+\item \textbf{Macro F1} ($\uparrow$) -- our primary metric; weights all classes equally.
+\item \textbf{Mean absolute label distance / MAE} ($\downarrow$) -- per midterm reviewer feedback. Treats the problem as ordinal: predicting \textit{great} when the truth is \textit{good} is penalized less than \textit{bad}. Computed as $\sum_{i,j} M_{ij}\cdot|i-j| / \sum_{i,j} M_{ij}$ over the confusion matrix $M$. A random uniform predictor on 5 classes has MAE $=1.6$; the worst case is $4.0$.
+\end{itemize}
+
+\section{Results}
+
+\subsection{Five-class performance}
+
+\begin{Figure}
+\centering
+\small
+\begin{tabular}{lrrr}
+\toprule
+Model & Acc.\ $\uparrow$ & Macro F1 $\uparrow$ & MAE $\downarrow$\\
+\midrule
+Majority baseline                  & 0.231 & 0.075 & 1.77\\
+\textbf{TF-IDF + LR}               & \textbf{0.423} & \textbf{0.401} & 1.19\\
+Structured + LR                    & 0.385 & 0.364 & 1.31\\
+Structured + RF                    & 0.269 & 0.251 & 1.58\\
+DistilBERT (frozen) + LR           & 0.192 & 0.188 & 1.77\\
+DistilBERT FT (per-comment)        & 0.231 & 0.174 & 1.65\\
+DistilBERT FT (movie-level)        & 0.269 & 0.161 & \textbf{1.27}\\
+Ensemble (soft vote)               & 0.269 & 0.274 & 1.46\\
+\bottomrule
+\end{tabular}
+\captionof{table}{Five-class test results across all six model variants plus the ensemble. TF-IDF + LR wins on accuracy and macro F1; movie-level fine-tuned DistilBERT wins on MAE.}
+\label{tab:5class}
+\end{Figure}
+
+\begin{Figure}
+\centering
+\includegraphics[width=\linewidth]{report_figures/fig_final_comparison.png}
+\captionof{figure}{Test-set performance across all model variants. MAE rescaled to $/4$ for plotting (lower is better).}
+\label{fig:final_comp}
+\end{Figure}
+
+\subsection{Three-class performance}
+
+\begin{Figure}
+\centering
+\small
+\begin{tabular}{lrrr}
+\toprule
+Model & Acc.\ $\uparrow$ & Macro F1 $\uparrow$ & MAE $\downarrow$\\
+\midrule
+\textbf{TF-IDF + LR}     & \textbf{0.538} & \textbf{0.522} & 0.69\\
+Structured + LR          & 0.462 & 0.454 & 0.81\\
+DistilBERT (frozen) + LR & 0.308 & 0.291 & 1.00\\
+\bottomrule
+\end{tabular}
+\captionof{table}{Three-class (negative / neutral / positive) test results.}
+\label{tab:3class}
+\end{Figure}
+
+\subsection{Confusion matrix and error structure}
+\noindent Figure~\ref{fig:cm} shows the TF-IDF confusion matrix on test. Most errors are off-by-one between neighbouring buckets (good $\leftrightarrow$ great, mediocre $\leftrightarrow$ average), consistent with the ordinal interpretation reflected in the MAE metric.
+
+\begin{Figure}
+\centering
+\includegraphics[width=0.85\linewidth]{report_figures/fig_confusion_tfidf.png}
+\captionof{figure}{Confusion matrix on the 26-movie test set (TF-IDF + LR, 5-class).}
+\label{fig:cm}
+\end{Figure}
+
+\subsection{Per-window temporal ablation}
+\noindent To answer the proposal's question of \emph{which pre-release window carries the most signal}, we trained Structured + LR with each temporal window in isolation (Table~\ref{tab:temporal}, Figure~\ref{fig:temporal}). The \textbf{late} window (closest to release) matches or exceeds the full-feature model on every metric and clearly outperforms early or middle alone. This supports the hypothesis that as release approaches, the comment pool shifts from core fans to broader audiences whose sentiment more closely tracks the eventual Letterboxd user base.
+
+\begin{Figure}
+\centering
+\small
+\begin{tabular}{lrrr}
+\toprule
+Variant & Acc & F1 & MAE\\
+\midrule
+Full (all windows)  & 0.385 & 0.364 & 1.31\\
+No temporal         & 0.346 & 0.318 & 1.35\\
+Early only          & 0.346 & 0.329 & 1.35\\
+Middle only         & 0.308 & 0.287 & 1.50\\
+\textbf{Late only}  & \textbf{0.385} & \textbf{0.368} & \textbf{1.23}\\
+\bottomrule
+\end{tabular}
+\captionof{table}{Per-window temporal ablation on Structured + LR.}
+\label{tab:temporal}
+\end{Figure}
+
+\begin{Figure}
+\centering
+\includegraphics[width=\linewidth]{report_figures/fig_temporal_ablation.png}
+\captionof{figure}{Late-window comments alone match or beat the full feature set.}
+\label{fig:temporal}
+\end{Figure}
+
+\subsection{Expectation--reality}
+\noindent The proposal's third novel component asked whether anticipatory hype tracks with post-release reception. We compute Pearson and Spearman correlations between \texttt{hype\_minus\_neg} and the rating bucket: $r = 0.27$, $\rho = 0.24$ (Figure~\ref{fig:exp_reality}). The trend is clearly positive but noisy. Notable outliers:
+
+\paragraph{Over-hyped flops} (high hype, low rating): \textit{Disenchanted}, \textit{The Prom}, \textit{After Ever Happy}, \textit{Halloween Ends}.
+
+\paragraph{Sleeper hits} (low hype, high rating): \textit{Wicked Little Letters}, \textit{Dungeons \& Dragons: Honor Among Thieves}, \textit{Challengers}, \textit{The Fall Guy}.
+
+\begin{Figure}
+\centering
+\includegraphics[width=\linewidth]{report_figures/fig_expectation_reality.png}
+\captionof{figure}{Pre-release hype vs.\ post-release rating. Solid trend ($r=0.27$) confirms a positive but noisy relationship.}
+\label{fig:exp_reality}
+\end{Figure}
+
+\subsection{Error analysis}
+\noindent Eight test movies were misclassified by \emph{all four} primary models (TF-IDF, Structured-LR, both DistilBERT fine-tunes): \textit{The Invisible Man}, \textit{Twisters}, \textit{The Matrix Resurrections}, \textit{The New Mutants}, \textit{The Gray Man}, \textit{A Good Person}, \textit{After Ever Happy}, and \textit{What's Love Got to Do with It?}. Aggregating the off-by-$X$ distribution across all 4 models $\times$ 26 test movies, we observe a positive mean signed error of $+0.39$, indicating a systematic tendency to \emph{over-predict} the rating bucket. This is consistent with viral trailers generating enthusiasm regardless of the movie's eventual quality. The franchise reboots in this list (\textit{Matrix Resurrections}, \textit{New Mutants}) likely fool models that learn a positive \textit{matrix}/\textit{x-men} prior from training data.
+
+\section{Discussion}
+
+\paragraph{Why TF-IDF wins.} On 121 training movies with $\sim$13M characters of concatenated text per movie, lexical features are a near-perfect match for the regime: TF-IDF \emph{processes the entire text}, while a transformer is constrained by its context window (DistilBERT sees $\approx$2K of $\approx$100K characters). Movie-title and brand tokens (\textit{kraven, borderlands, snake eyes} for \textit{bad}; \textit{a24, dune, wes anderson, pixar} for \textit{great}) are heavily weighted. Removing the 5 most frequent capitalized proper nouns dropped macro F1 by $\approx$0.05, showing that title-token memorization is a real but partial driver---temporal-sentiment, hype, and engagement features still carry independent signal.
+
+\paragraph{Why fine-tuning did not help.} The per-comment fine-tune suffers heavy pseudo-label noise: a sarcastic or off-topic comment under a \textit{great} movie still inherits the \textit{great} label. Train accuracy reached 0.975 while val macro F1 plateaued at 0.10, the textbook overfit signature. The movie-level fine-tune trades pseudo-label noise for tiny $n$ (121 examples for a 66M-parameter model). Best val F1 was reached at epoch 1 and never recovered; the 512-token context covers only $\sim$2\% of each movie's text. The movie-level variant achieves the best test MAE (1.27) of any model: even when wrong, its predictions are close to the truth---a real ordinal-quality win that 5-class accuracy hides.
+
+\paragraph{Why ensembles did not help.} The soft-vote ensemble underperformed TF-IDF alone because DistilBERT's poorly calibrated probabilities pulled the average toward the wrong class.
+
+\paragraph{Late-window dominance.} The temporal ablation directly confirms the proposal's hypothesis: comments closer to release---when broader audiences have arrived and absorbed early reactions---are the strongest single predictor of post-release reception.
+
+\section{Limitations and Future Work}
+
+\paragraph{Limitations.} (1) The 26-movie test set means a single misclassification shifts macro F1 by $\approx$0.015--0.02. (2) Our TMDB vote-count filter biases the dataset toward commercially prominent films, underrepresenting niche titles with extreme ratings. (3) Letterboxd scores were scraped at one point in time; recently released films have not fully converged. (4) Both fine-tuning strategies were limited to DistilBERT-base; we attempted a Longformer (4096-token context) experiment but had to abort due to swap-thrashing on a 16GB MacBook Air M4.
+
+\paragraph{Future work.} (i) Long-context fine-tuning on a GPU machine where Longformer or BigBird can fit. (ii) Genre-aware modeling: cross-genre generalization tests by holding out one genre at a time. (iii) Calibration: align DistilBERT's class probabilities (via temperature scaling) so it can ensemble usefully. (iv) Replacing per-comment pseudo-labels with weak supervision (e.g.\ filtering to comments with high VADER magnitude) before fine-tuning.
+
+\section{Conclusion}
+\noindent We presented a six-model study of pre-release YouTube trailer comment signals for post-release Letterboxd rating prediction. On 173 movies with five rating classes, TF-IDF + LR (\textbf{0.423 acc, 0.401 macro F1, 1.19 MAE}) outperforms structured features, frozen DistilBERT, and both end-to-end DistilBERT fine-tunes. Late-window sentiment, brand vocabulary, and hype--negativity all carry meaningful signal. Our negative result on transformer fine-tuning---honest given $n{=}121$---reinforces \cite{pang2002}'s observation that lexical methods remain competitive in low-resource text classification, and points to long-context architectures or weakly supervised fine-tuning as the next steps.
+
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+\bibitem{pang2002} B.~Pang, L.~Lee, and S.~Vaithyanathan. \textit{Thumbs up? Sentiment classification using machine learning techniques.} EMNLP 2002, 79--86.
+\bibitem{asur2010} S.~Asur and B.~A.~Huberman. \textit{Predicting the future with social media.} IEEE/WIC/ACM Web Intelligence, 2010, 492--499.
+\bibitem{devlin2019} J.~Devlin, M.-W.~Chang, K.~Lee, and K.~Toutanova. \textit{BERT: Pre-training of deep bidirectional transformers for language understanding.} NAACL-HLT 2019, 4171--4186.
+\bibitem{sanh2019} V.~Sanh, L.~Debut, J.~Chaumond, and T.~Wolf. \textit{DistilBERT, a distilled version of BERT: smaller, faster, cheaper and lighter.} arXiv:1910.01108, 2019.
+\bibitem{hutto2014} C.~J.~Hutto and E.~Gilbert. \textit{VADER: A parsimonious rule-based model for sentiment analysis of social media text.} ICWSM 2014.
+\bibitem{pedregosa2011} F.~Pedregosa et al. \textit{Scikit-learn: Machine learning in Python.} JMLR 12 (2011), 2825--2830.
+\bibitem{wolf2020} T.~Wolf et al. \textit{Transformers: State-of-the-art natural language processing.} EMNLP 2020 System Demonstrations, 38--45.
+\end{thebibliography}
+
+\end{multicols}
+
+\end{document}

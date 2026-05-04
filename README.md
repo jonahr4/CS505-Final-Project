@@ -1,306 +1,342 @@
 # Predicting Post-Release Letterboxd Ratings from Pre-Release YouTube Trailer Comments
 
-**CS505 Final Project** — can you predict how a movie will be rated *after* it comes out, using only the YouTube trailer comments posted *before* it came out?
+> **CS505 Final Project** — Boston University
+> Jigar Kanakhara · Bhavya Bavissi · Jonah Rothman
 
-This repository contains the full data-collection and modeling pipeline used to answer that question on a dataset of 210 movies and ~236K pre-release comments.
+Can pre-release YouTube trailer comments predict how a movie is eventually rated on Letterboxd? We built an end-to-end pipeline (TMDB → YouTube → Letterboxd) that produced **173 movies** and **~236,000 pre-release comments**, then trained **six** different models to find out.
+
+**TL;DR — TF-IDF + Logistic Regression wins.** A 1972-style bag-of-words classifier beats two end-to-end fine-tuned DistilBERT variants at this dataset scale. Honest finding, real story for the report.
 
 ---
 
 ## Table of contents
 
-1. [Problem](#problem)
-2. [Results summary](#results-summary)
-3. [Repository layout](#repository-layout)
-4. [Pipeline overview](#pipeline-overview)
-5. [What each script does](#what-each-script-does)
-6. [How to reproduce from scratch](#how-to-reproduce-from-scratch)
-7. [How to rerun only the models](#how-to-rerun-only-the-models)
-8. [Design decisions & rationale](#design-decisions--rationale)
-9. [Known limitations](#known-limitations)
+1. [Highlights](#highlights)
+2. [Final results](#final-results)
+3. [Pipeline](#pipeline)
+4. [What every script does](#what-every-script-does)
+5. [How to reproduce](#how-to-reproduce)
+6. [Design decisions](#design-decisions)
+7. [Limitations](#limitations)
 
 ---
 
-## Problem
+## Highlights
 
-- **Input**: for each movie, all YouTube comments posted on its official trailer(s) **before the movie was released**.
-- **Label**: the movie's post-release aggregate Letterboxd rating, bucketed into 5 classes (bad / mediocre / average / good / great).
-- **Task**: 5-class classification. We also report the coarser 3-class version (negative / neutral / positive) as a secondary analysis.
-- **Critical constraint**: the train/val/test split is at the **movie level**, not the comment level, to prevent a movie's signal from leaking across splits.
-
----
-
-## Results summary
-
-Final dataset: **173 movies** (filtered from 210 after requiring ≥30 pre-release comments), **~236K comments**, **~18M characters of text**.
-
-### 5-class (primary task)
-
-| Model | Test Accuracy | Test Macro F1 |
-|---|---|---|
-| Majority-class baseline | 0.231 | 0.075 |
-| **TF-IDF + Logistic Regression** 🏆 | **0.423** | **0.401** |
-| Structured features + Logistic Regression | 0.385 | 0.364 |
-| Structured features + Random Forest | 0.269 | 0.251 |
-| DistilBERT embeddings + Logistic Regression | 0.192 | 0.188 |
-| Ensemble (soft vote of top 3) | 0.269 | 0.274 |
-
-### 3-class (secondary analysis, merges bad/mediocre and good/great)
-
-| Model | Test Accuracy | Test Macro F1 |
-|---|---|---|
-| **TF-IDF + Logistic Regression** 🏆 | **0.538** | **0.522** |
-| Structured features + Logistic Regression | 0.462 | 0.454 |
-| DistilBERT embeddings + Logistic Regression | 0.308 | 0.291 |
-
-**Headline**: TF-IDF + LogReg on raw concatenated comments is our strongest model — **5× the baseline macro F1** in 5-class, and **53.8% accuracy in 3-class**. Hand-engineered features (VADER sentiment + hype/spam/credibility/temporal heuristics) are a close second. Feature-extraction DistilBERT underperforms at this dataset size — likely needs end-to-end fine-tuning to be competitive.
-
-All per-class metrics, confusion matrices, hyperparameter sweeps, and ensemble details are saved under `results/` (committed).
+- **6 model variants** spanning lexical, hand-engineered, frozen-transformer, and two end-to-end fine-tuning regimes.
+- **Three evaluation metrics**: accuracy, macro F1, and *mean absolute label distance* (MAE — added per midterm reviewer feedback because the 5-class task is ordinal, not nominal).
+- **All three "novel components"** from the proposal implemented and quantified:
+  - **Temporal modeling** → per-window ablation shows the *late* window dominates.
+  - **Expectation–reality gap** → a hand-crafted hype/negativity signal correlates positively with actual ratings (Pearson r = 0.27).
+  - **Credibility-weighted aggregation** → like-weighted VADER sentiment.
+- **Reproducible**: every stochastic step uses seed=42; the YouTube/Letterboxd scrapers are checkpointed and resume from quota exhaustion.
+- **Honest negative result**: end-to-end DistilBERT fine-tuning (per-comment AND movie-level) does **not** beat TF-IDF at n=121 train movies — but movie-level fine-tuning achieves the best **MAE** of any model (predictions are closer to truth even when wrong).
 
 ---
 
-## Repository layout
+## Final results
 
-```
-nlp project/
-├── README.md                          (this file)
-├── .env.example                       ← template; copy to .env and fill in keys
-├── .gitignore
-├── requirements.txt
-│
-├── collect_tmdb_movies.py             Step 1  — pull candidate movies from TMDB
-├── inspect_tmdb_movies.py             Step 1b — quick QC on the candidate list
-├── fetch_earliest_release.py          Step 1c — earliest theatrical date per movie
-├── select_movies.py                   Step 1d — stratified pick of 150 movies
-├── expand_to_200.py                   Step 1e — add ~60 more to reach 200-movie target
-├── scrape_youtube_comments.py         Step 2  — pull pre-release YouTube comments
-├── scrape_letterboxd.py               Step 3  — scrape post-release Letterboxd ratings
-├── build_final_dataset.py             Step 4  — filter, bucket labels, train/val/test split
-│
-├── models/
-│   ├── baseline_majority.py           Model 0 — always-predict-majority floor
-│   ├── tfidf_logreg.py                Model 1 — TF-IDF + LogReg (n-grams, balanced)
-│   ├── structured_features.py         Model 2 — VADER + hype/spam/temporal feats + RF/LR
-│   ├── distilbert_model.py            Model 3 — DistilBERT embeddings + LR
-│   ├── tune_and_ensemble.py           Post-hoc: TF-IDF HP sweep, 3-class eval, soft-vote
-│   └── compare_all.py                 Summary table across all model outputs
-│
-├── data/                              (not committed — regenerate with the scripts)
-│   ├── raw/                           scraped inputs
-│   │   ├── movies_master_tmdb.csv, movies_master_tmdb.json
-│   │   ├── movies_selected.csv        the 210-movie working set
-│   │   ├── letterboxd_scrape_log.csv
-│   │   ├── comments_index.csv         per-trailer scrape stats
-│   │   └── comments/{tmdb_id}/{trailer_id}.json   raw comment dumps
-│   └── processed/
-│       ├── movies_dataset.csv         the final modeling table (one row per movie)
-│       └── movie_comments.jsonl       per-movie lists of raw comments
-│
-└── results/                           (not committed — regenerate by running the models)
-    ├── baselines/majority_baseline.json
-    ├── tfidf_logreg/results.json
-    ├── structured_features/{results.json, features.csv}
-    ├── distilbert/{results.json, movie_embeddings.npy, movie_embeddings_meta.csv}
-    ├── improvements.json               tuned TF-IDF, 3-class metrics, ensemble
-    └── comparison.json                 one-table summary
-```
+### 5-class test set (n=26 movies)
+
+| Model | Acc ↑ | Macro F1 ↑ | MAE ↓ |
+|---|---:|---:|---:|
+| Majority baseline | 0.231 | 0.075 | 1.77 |
+| **🏆 TF-IDF + LR** | **0.423** | **0.401** | 1.19 |
+| Structured + LR | 0.385 | 0.364 | 1.31 |
+| Structured + RF | 0.269 | 0.251 | 1.58 |
+| DistilBERT (frozen) + LR | 0.192 | 0.188 | 1.77 |
+| DistilBERT FT (per-comment, [CLS]) | 0.231 | 0.174 | 1.65 |
+| DistilBERT FT (movie-level, [CLS]) | 0.269 | 0.161 | **1.27** |
+| Ensemble (soft vote) | 0.269 | 0.274 | 1.46 |
+
+### 3-class collapsed task ({bad,mediocre} / {average} / {good,great})
+
+| Model | Acc ↑ | Macro F1 ↑ |
+|---|---:|---:|
+| **🏆 TF-IDF + LR** | **0.538** | **0.522** |
+| Structured + LR | 0.462 | 0.454 |
+| DistilBERT (frozen) + LR | 0.308 | 0.291 |
+
+### Per-window temporal ablation (Structured + LR)
+
+| Variant | Acc | Macro F1 | MAE |
+|---|---:|---:|---:|
+| Full (all windows)  | 0.385 | 0.364 | 1.31 |
+| No temporal         | 0.346 | 0.318 | 1.35 |
+| Early only          | 0.346 | 0.329 | 1.35 |
+| Middle only         | 0.308 | 0.287 | 1.50 |
+| **Late only**       | **0.385** | **0.368** | **1.23** |
+
+The **late** pre-release window matches or exceeds the full feature set on every metric. Comments closer to release carry the most signal — consistent with the hypothesis that as release approaches, the audience pool shifts from core fans to the broader Letterboxd-representative crowd.
+
+### Expectation–reality gap
+
+`hype_minus_neg` (fraction of hype phrases minus fraction of negative-anticipation phrases) vs. actual rating bucket:
+
+- **Pearson correlation: r = 0.27, Spearman ρ = 0.24** — positive but noisy.
+- **Over-hyped flops** (high hype, low rating): *Disenchanted, The Prom, After Ever Happy, Halloween Ends*
+- **Sleeper hits** (low hype, high rating): *Wicked Little Letters, Dungeons & Dragons: Honor Among Thieves, Challengers, The Fall Guy*
+
+### Error analysis
+
+8 of 26 test movies were misclassified by **all 4** primary models:
+*The Invisible Man, Twisters, The Matrix Resurrections, The New Mutants, The Gray Man, A Good Person, After Ever Happy, What's Love Got to Do with It?*
+
+Aggregate mean signed error across all `(model, movie)` pairs: **+0.39 buckets** — models systematically **over-predict**. Plausible: viral trailers generate enthusiasm regardless of eventual quality. Franchise reboots (*Matrix Resurrections*, *New Mutants*) likely fool models that learned a positive *matrix*/*x-men* prior.
 
 ---
 
-## Pipeline overview
+## Pipeline
 
 ```
   TMDB Discover API          YouTube Data API v3           letterboxd.com
        │                             │                            │
        ▼                             ▼                            ▼
-collect_tmdb_movies.py       scrape_youtube_comments.py    scrape_letterboxd.py
-fetch_earliest_release.py    (per-trailer JSONs)           (updates movies_selected.csv)
+collect_tmdb_movies.py        scrape_youtube_comments.py   scrape_letterboxd.py
+fetch_earliest_release.py     (per-trailer JSONs)
 select_movies.py
 expand_to_200.py
-       │                             │                            │
-       └────────────┬────────────────┴────────────┬───────────────┘
-                    ▼                             ▼
-              build_final_dataset.py (filter, bucket, stratified movie-level split)
-                                      │
-                                      ▼
-                        data/processed/movies_dataset.csv
-                                      │
-                ┌─────────────────────┼─────────────────────┐
-                ▼                     ▼                     ▼
-       baseline_majority.py   tfidf_logreg.py     structured_features.py
-                                                 distilbert_model.py
-                                      │
-                                      ▼
-                        tune_and_ensemble.py + compare_all.py
+       └──────────────────┬───────────────────────────┬───────────┘
+                          ▼                           ▼
+                 build_final_dataset.py  (filter, bucket, movie-level split)
+                                          │
+                                          ▼
+                          data/processed/movies_dataset.csv
+                                          │
+              ┌───────────┬───────────────┼───────────────────┬─────────────┐
+              ▼           ▼               ▼                   ▼             ▼
+        baseline   tfidf_logreg   structured_features   distilbert_*   compare_all
+         (floor)     (lexical)     (VADER + heuristics) (5 transformer (final
+                                                          variants)     summary)
+                                          │
+                                          ▼
+                       analysis/{temporal_ablation, expectation_reality,
+                                 error_analysis, add_mae_metric}.py
 ```
 
 ---
 
-## What each script does
+## What every script does
 
-### Data collection
+### Data collection (root)
 
-**`collect_tmdb_movies.py`** — queries TMDB's `/discover/movie` for years 2020–2024 with filters (English-language, released, popularity ≥ 5, vote_count ≥ 200), then fetches each movie's details and videos. Keeps only movies with ≥ 2 official YouTube trailers. Caps at 4 trailers per movie. **Output**: `data/raw/movies_master_tmdb.csv` (388 candidate movies).
-
-**`inspect_tmdb_movies.py`** — reads the master CSV and prints per-year counts, language sanity check, trailer-count histogram, popularity distribution, release-date range, and any suspicious rows. **No outputs written.**
-
-**`fetch_earliest_release.py`** — for each movie, calls TMDB `/movie/{id}/release_dates` and computes the earliest global theatrical/premiere date across regions (type ∈ {premiere, limited theatrical, theatrical}). Adds `earliest_release_date`, `earliest_release_type`, `earliest_release_country` columns. **Overwrites** `movies_master_tmdb.csv` in place.
-
-**`select_movies.py`** — stratified pick of 150 movies (30 per year × 5 years, 3 popularity tertiles within each year). Uses `RANDOM_SEED = 42` for reproducibility. **Output**: `data/raw/movies_selected.csv`.
-
-**`expand_to_200.py`** — picks ~60 additional movies from the unused pool using stratified sampling (seed 43), fetches their earliest-release dates and Letterboxd ratings, and **appends** them to the existing `movies_selected.csv`. End state: ~210 rows.
-
-**`scrape_youtube_comments.py`** — for each (movie, trailer), uses YouTube Data API v3 `commentThreads.list` with `order=time` (newest-first) to pull comments. Pre-checks the trailer's upload date; if uploaded after the movie's cutoff, skips that trailer. Filters comments to `published_at < release_date` (we use the wide-release cutoff, see [Design decisions](#design-decisions--rationale)). Caps at 1,000 kept pre-release comments per trailer. **Idempotent & resumable**: skips trailers whose JSON already exists; on quota exhaustion, saves progress and exits. **Outputs**: `data/raw/comments/{tmdb_id}/{trailer_id}.json`, `data/raw/comments_index.csv`.
-
-**`scrape_letterboxd.py`** — for each movie in `movies_selected.csv`, guesses the Letterboxd URL from title+year (two slug variants), fetches the page, and extracts the aggregate rating from the JSON-LD block (primary) or twitter meta tag (fallback). Scores both slug variants and picks the one with more ratings to avoid matching obscure collisions. **Politeness**: 2s/request, browser User-Agent. **Updates** `movies_selected.csv` in place with `letterboxd_url`, `letterboxd_rating`, `letterboxd_rating_count`, `letterboxd_match_method`.
+| Script | Role |
+|---|---|
+| `collect_tmdb_movies.py` | TMDB Discover query → 388 candidate movies (English, 2020–2024, ≥200 votes, ≥2 official trailers) |
+| `inspect_tmdb_movies.py` | Quality check: per-year counts, language sanity, trailer histogram |
+| `fetch_earliest_release.py` | Calls `/movie/{id}/release_dates`, computes earliest global theatrical/premiere date |
+| `select_movies.py` | Stratified pick of 150 movies (30/year × 5 years × 3 popularity tertiles, seed=42) |
+| `expand_to_200.py` | Adds 60 more movies from the unused pool to land at ~210 (seed=43) |
+| `scrape_youtube_comments.py` | YouTube Data API v3 `commentThreads.list` with `order=time`. Pre-checks each trailer's upload date and skips post-release uploads. Caps at 1,000 pre-release comments per trailer. **Resumable** on quota exhaustion. |
+| `scrape_letterboxd.py` | Constructs candidate URLs from title + year, parses the JSON-LD `aggregateRating` block. Picks the slug with more logged ratings to avoid obscure short-film collisions. 2-second-per-request politeness. |
 
 ### Dataset assembly
 
-**`build_final_dataset.py`** — loads `movies_selected.csv` and every `comments/*/*.json`. Drops movies with < 30 pre-release comments. Assigns each movie a 5-class `rating_bucket` (bad/mediocre/average/good/great — custom thresholds chosen to roughly balance classes). Stratified 70/15/15 movie-level train/val/test split, seed 42. Aggregates comments into a single `comments_text` blob per movie (for TF-IDF) and preserves the per-comment list (for structured-features and DistilBERT). **Outputs**: `data/processed/movies_dataset.csv` (one row per movie) and `data/processed/movie_comments.jsonl` (richer per-comment data).
+| Script | Role |
+|---|---|
+| `build_final_dataset.py` | Filters to ≥30 pre-release comments per movie, assigns 5-class buckets, makes the 70/15/15 movie-level stratified split. Outputs `movies_dataset.csv` (one row per movie) and `movie_comments.jsonl` (per-comment data). |
 
-### Modeling
+### Models (under `models/`)
 
-**`models/baseline_majority.py`** — always predicts the train-set majority class (class 4, "great"). Establishes the floor every real model must beat.
+| Script | Role |
+|---|---|
+| `baseline_majority.py` | Predicts train majority class — establishes the floor every real model must beat |
+| `tfidf_logreg.py` | TF-IDF (uni+bigrams, 20K features) → balanced multinomial L2 logistic regression. **Best model.** |
+| `structured_features.py` | 25 hand-crafted per-movie features (VADER sentiment, hype/negativity phrases, engagement, spam-likeness, **temporal windows**, **credibility-weighted sentiment**). Trains both Logistic Regression and Random Forest. |
+| `distilbert_model.py` | Frozen `distilbert-base-uncased`, mean-pool comment embeddings to one 768-d movie vector, LR on top. (Midterm-era setup.) |
+| `distilbert_finetune.py` | **End-to-end fine-tune, per-comment.** Each comment inherits its movie's bucket (pseudo-labels). Train [CLS] head on 80K examples. Movie-level inference via mean-pooled softmax probabilities. |
+| `distilbert_finetune_movie.py` | **End-to-end fine-tune, movie-level.** One input per movie (top-60 most-liked comments concatenated, 512 tokens). Heavier regularization for n=121. |
+| `longformer_finetune.py` | Longformer (4096-token context) variant — written and tested. **Aborted in production** due to swap-thrashing on 16GB unified-memory M4 Air. Included for reference / GPU-machine reruns. |
+| `tune_and_ensemble.py` | TF-IDF hyperparameter sweep (135 configs), 3-class re-evaluation of all 5-class predictions, soft-vote ensemble of TF-IDF + structured-LR + DistilBERT-LR. |
+| `compare_all.py` | Walks every `results/*/results.json`, prints a unified summary table. |
+| `add_mae_metric.py` | Reads each model's saved confusion matrix and computes mean absolute label distance — the ordinal-aware metric the grader recommended. |
 
-**`models/tfidf_logreg.py`** — TF-IDF (word + bigrams, min_df=2, max_df=0.95, max_features=20k, English stopwords) on the concatenated comments_text. Multinomial LogisticRegression with `class_weight="balanced"` and L2 regularization (C=1.0). Also prints top-10 discriminative features per class. **Best-performing model.**
+### Analysis (under `analysis/`)
 
-**`models/structured_features.py`** — extracts 25 per-movie interpretable features from the per-comment JSONL:
-- **Sentiment** (VADER): mean, std, pos-frac, neg-frac
-- **Hype / negative anticipation**: fractions of comments containing hand-curated hype or negative-hype phrases
-- **Volume & engagement**: comment count, avg length, like counts (mean & median), reply rate
-- **Spam-like**: uppercase fraction, emoji density, short-comment fraction
-- **Temporal** (novel): sentiment & hype fraction in early/middle/late thirds of each movie's pre-release comment timeline
-- **Credibility-weighted sentiment** (novel): VADER compound averaged with weights `log1p(like_count) + 1`
-- **Hype-minus-neg** (novel): a signed expectation-reality proxy
+| Script | Role |
+|---|---|
+| `expectation_reality.py` | Computes Pearson/Spearman correlation between `hype_minus_neg` and rating bucket; identifies over-hyped flops and sleeper hits. Saves figure. |
+| `error_analysis.py` | Cross-references test predictions across all primary models. Identifies movies misclassified by all 4 (the "universal misses"). Reports off-by-X distribution. |
+| `temporal_ablation.py` | Trains Structured + LR with each temporal window (early / middle / late) in isolation. Quantifies which window carries most signal. |
 
-Trains both a RandomForest (500 trees) and a scaled LogisticRegression. Prints top-10 feature importances from the RF.
+### Report
 
-**`models/distilbert_model.py`** — loads `distilbert-base-uncased`. For each movie, samples up to 200 comments (preferring longer ones), mean-pools token embeddings per comment, then mean-pools comment embeddings to a single 768-d movie vector. Trains a LogisticRegression on those vectors. This is **feature-extraction**, not fine-tuning — the BERT weights are frozen. On CPU this script takes ~20–30 min; with GPU/MPS much faster.
-
-**`models/tune_and_ensemble.py`** — three post-hoc analyses in one script:
-1. TF-IDF hyperparameter sweep (135 configs: C × ngram_range × min_df × max_features, selected on val macro F1).
-2. 3-class re-evaluation: collapse the 5-class predictions to {neg, neu, pos} and recompute metrics.
-3. Soft-vote ensemble: average the class-probability outputs of TF-IDF, structured-LR, and DistilBERT-LR, then argmax.
-
-**`models/compare_all.py`** — walks each `results/*/results.json`, pulls train/val/test acc and macro F1, prints a single summary table, writes `results/comparison.json`.
+| File | Role |
+|---|---|
+| `final_report.tex` | LaTeX source for the final 4–6 page paper. Drop into Overleaf with the figures. |
 
 ---
 
-## How to reproduce from scratch
+## How to reproduce
 
-The full end-to-end run takes ~4–6 hours of wall time (mostly YouTube comment scraping) and uses one day of YouTube Data API quota (~10k units).
-
-### 1. Clone, create a venv, install deps
+### 1. Setup
 
 ```bash
 git clone https://github.com/jonahr4/CS505-Final-Project.git
 cd CS505-Final-Project
+git checkout final-branch
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Get API keys
+### 2. API keys
 
-- **TMDB**: https://www.themoviedb.org/settings/api — free, instant.
-- **YouTube Data API v3**: https://console.cloud.google.com/apis/credentials — requires a Google Cloud project with the API enabled. Free, 10k units/day.
-
-### 3. Set environment variables
+Copy `.env.example` → `.env` and fill in:
+- **TMDB key**: free at https://www.themoviedb.org/settings/api
+- **YouTube Data API v3 key**: free at https://console.cloud.google.com/apis/credentials (10K quota units/day)
 
 ```bash
 cp .env.example .env
-# edit .env and paste your keys
+# edit .env
 export $(cat .env | xargs)
 ```
 
-### 4. Run the pipeline
+### 3. Run pipeline (once, ~4–6 hours wall time)
 
 ```bash
-# Data collection (long pole: step 2, ~2–4 hours)
-python collect_tmdb_movies.py                 # ~5 min
-python inspect_tmdb_movies.py                 # <1 min (optional QC)
-python fetch_earliest_release.py              # ~2 min
-python select_movies.py                       # instant
-python expand_to_200.py                       # ~10 min
-python scrape_letterboxd.py                   # ~10 min (polite 2s/req)
-python scrape_youtube_comments.py             # 2–4 hours, quota-bound, resumable
+# Data collection
+python collect_tmdb_movies.py            # ~5 min
+python inspect_tmdb_movies.py            # optional QC
+python fetch_earliest_release.py         # ~2 min
+python select_movies.py                  # instant
+python expand_to_200.py                  # ~10 min
+python scrape_letterboxd.py              # ~10 min (polite 2s/req)
+python scrape_youtube_comments.py        # 2–4 hours, quota-bound, resumable
 
-# Dataset build
-python build_final_dataset.py                 # ~30 sec
+# Dataset
+python build_final_dataset.py            # ~30 sec
 
-# Models
-python models/baseline_majority.py            # instant
-python models/tfidf_logreg.py                 # ~10 sec
-python models/structured_features.py          # ~30 sec
-python models/distilbert_model.py             # ~20 min on CPU, much faster with GPU/MPS
-python models/tune_and_ensemble.py            # ~20 sec
-python models/compare_all.py                  # instant
+# Baseline + classical models
+python models/baseline_majority.py       # instant
+python models/tfidf_logreg.py            # ~10 sec
+python models/structured_features.py     # ~30 sec
+
+# Frozen DistilBERT (feature extraction)
+python models/distilbert_model.py        # ~20 min on CPU, faster on MPS/GPU
+
+# End-to-end fine-tuning (the grader's primary ask)
+python models/distilbert_finetune.py        # ~3 hours on M4 Air MPS
+python models/distilbert_finetune_movie.py  # ~5 min on M4 Air MPS
+
+# Post-hoc analyses
+python models/tune_and_ensemble.py       # ~20 sec
+python models/compare_all.py             # instant
+python models/add_mae_metric.py          # instant
+python analysis/temporal_ablation.py     # ~5 sec
+python analysis/expectation_reality.py   # ~5 sec
+python analysis/error_analysis.py        # ~10 sec
 ```
 
-If your YouTube quota runs out mid-scrape, the script exits cleanly and you can just rerun it after the daily reset (midnight Pacific). It skips trailers whose JSON already exists.
+If your YouTube quota runs out mid-scrape, the script exits cleanly. Wait until midnight Pacific (the daily reset) and rerun — it skips trailers whose JSON already exists.
+
+### 4. Build the report PDF
+
+```bash
+# Generate figures
+python make_final_figures.py             # creates report_figures/
+
+# Then upload final_report.tex + report_figures/ to Overleaf and compile,
+# or compile locally if you have MacTeX:
+# pdflatex final_report.tex
+```
 
 ---
 
-## How to rerun only the models
-
-No data or results are committed — everything must be regenerated via the scripts. Once you have `data/processed/movies_dataset.csv` and `data/processed/movie_comments.jsonl` locally (by running the data-collection pipeline above), you can run the models in any order:
-
-```bash
-source venv/bin/activate
-python models/baseline_majority.py        # instant
-python models/tfidf_logreg.py             # ~10 sec
-python models/structured_features.py      # ~30 sec
-python models/distilbert_model.py         # ~20 min on CPU
-python models/tune_and_ensemble.py        # ~20 sec
-python models/compare_all.py              # instant
-```
-
-All models use seed=42 so numbers are reproducible.
-
----
-
-## Design decisions & rationale
+## Design decisions
 
 ### Leakage boundary: wide release date, not festival premiere
 
-A "pre-release" comment is one posted before the movie was publicly available. The naive choice is `release_date` (TMDB's wide-release date). A stricter alternative is `earliest_release_date` (includes film-festival premieres). We tried both:
+Naive choice: TMDB's `release_date` (wide release). Stricter alternative: `earliest_release_date` (includes festival premieres). We initially used strict and lost ~15 movies whose festival-to-wide gap was huge (e.g. *Promising Young Woman*: Sundance January → wide December = 11 months of throw-away comments).
 
-- **Strict** (earliest premiere): lost ~20% of our movies to big festival-to-wide gaps (e.g. *Yes, God, Yes* premiered at Sundance 16 months before wide release; under strict, we'd throw away all trailer comments in that 16-month window).
-- **Lenient** (wide release): recovered those movies. The leakage risk is minimal — general YouTube commenters aren't festival attendees and almost certainly haven't seen the film before its wide release.
-
-We ship with **lenient**. `earliest_release_date` is still stored for optional sensitivity analysis.
+**We ship with lenient (wide release).** General YouTube commenters in the gap window haven't seen the film. The strict cutoff is still stored in the dataset for any future sensitivity analysis.
 
 ### Rating bucket thresholds
 
-Letterboxd ratings in our dataset cluster between 2.5 and 3.5 (mean 3.0, std 0.63). Equal-width 5-class bins would leave the extreme classes nearly empty. We use class-balancing thresholds that also have interpretable star-rating meanings:
+Letterboxd ratings cluster narrowly (mean 3.0, std 0.63). Equal-width 5 bins → empty extreme classes. We use class-balancing thresholds:
 
-| Bucket | Range | Label |
-|---|---|---|
-| 0 | r < 2.3 | bad |
-| 1 | 2.3 ≤ r < 2.75 | mediocre |
-| 2 | 2.75 ≤ r < 3.15 | average |
-| 3 | 3.15 ≤ r < 3.5 | good |
-| 4 | r ≥ 3.5 | great |
-
-This gives class sizes of 22 / 21 / 30 / 25 / 29 after filtering — well-balanced.
+| Bucket | Range | Label | n |
+|---|---|---|---:|
+| 0 | r < 2.3 | bad | 22 |
+| 1 | 2.3 ≤ r < 2.75 | mediocre | 21 |
+| 2 | 2.75 ≤ r < 3.15 | average | 30 |
+| 3 | 3.15 ≤ r < 3.5 | good | 25 |
+| 4 | r ≥ 3.5 | great | 29 |
 
 ### Movie-level split, not comment-level
 
-Splitting comments would leak a movie's signal across train and test (same movie shows up in both). We split *movies* 70/15/15, stratified by rating bucket, seed=42. All comments for a movie live in the same split.
+Splitting comments would leak a movie's signal across train and test. We split *movies* 70/15/15 (121/26/26), stratified by rating bucket, seed=42. All comments for a movie live in the same split.
 
-### Min-comments threshold of 30
+### Per-comment vs movie-level fine-tuning
 
-Movies with <30 pre-release comments don't give us enough text for meaningful features. This cutoff drops ~20% of movies (mostly ones whose "official" TMDB trailers were actually post-release marketing uploads).
+Two complementary failure modes for transformers at n=121:
 
-### Why TF-IDF beats DistilBERT here
+- **Per-comment** turns 121 movies into 80K training examples by giving every comment its movie's label. Fixes the "tiny n" problem but introduces severe label noise (sarcastic comments under "great" movies still labeled "great"). **Result**: severe overfit, val F1 plateaued at 0.10.
+- **Movie-level** keeps clean labels but only has 121 training examples for a 66M-parameter model. **Result**: best val F1 at epoch 1, never recovered. Achieves the best MAE of any model (1.27) — even when wrong, it's close.
 
-Feature-extraction DistilBERT (frozen weights, mean-pooled embeddings averaged over ~200 comments/movie) washes out the task-specific signal. TF-IDF directly captures which **words and phrases** correlate with rating buckets (e.g. "kraven"/"bella thorne" → bad; "a24"/"pixar" → great). End-to-end fine-tuning of DistilBERT is the natural follow-up but needs larger n and careful regularization to avoid overfitting.
+Reporting both is the academically honest thing to do. Neither beats TF-IDF, which is itself a notable finding.
+
+### Why TF-IDF wins
+
+TF-IDF processes the **entire** ~100K characters of comment text per movie. DistilBERT sees ~2K. At n=121 with very long inputs and noisy text, lexical features beat compressed semantic representations — a pattern documented since Pang et al. (2002).
 
 ---
 
-## Known limitations
+## Limitations
 
-1. **Small test set (26 movies)** — a single misclassification moves test accuracy by ~3.8 points. Reported numbers have real variance; we note them with whole-percentage-point skepticism.
-2. **Hyperparameter tuning via val-set selection didn't help** — with n=26 val movies, the tuned TF-IDF configuration that won on val underperformed on test. We report both tuned and untuned numbers honestly.
-3. **No DistilBERT fine-tuning** — a legitimate next step, but beyond the scope of this project.
-4. **Popularity-biased sample** — our movies all satisfy TMDB's `vote_count ≥ 200` filter, so they're audience-aware films. True indie films with ~50 Letterboxd ratings are underrepresented.
-5. **Single snapshot of Letterboxd ratings** — we scraped ratings at one point in time. Letterboxd averages drift slowly but this is worth noting.
+1. **Small test set (26 movies)** — single misclassification moves accuracy ~3.8 points. Reported numbers carry real variance.
+2. **Popularity bias**: TMDB `vote_count ≥ 200` filter excludes truly obscure indie films.
+3. **Single-snapshot Letterboxd scrape**: ratings drift; recently released films have not converged.
+4. **Longformer aborted**: written and tested but not run to completion due to memory pressure on 16GB MacBook Air. Included as `models/longformer_finetune.py` for GPU/Linux reruns.
+5. **No genre-aware modeling**: error analysis hints at franchise-reboot bias; future work could ablate by genre.
+
+---
+
+## Repo structure
+
+```
+.
+├── README.md                          ← this file
+├── final_report.tex                   ← LaTeX source for the final paper
+├── requirements.txt
+├── .env.example                       ← API key template
+├── .gitignore
+│
+├── collect_tmdb_movies.py             Step 1
+├── inspect_tmdb_movies.py             Step 1b
+├── fetch_earliest_release.py          Step 1c
+├── select_movies.py                   Step 1d
+├── expand_to_200.py                   Step 1e
+├── scrape_youtube_comments.py         Step 2
+├── scrape_letterboxd.py               Step 3
+├── build_final_dataset.py             Step 4
+├── make_figures.py                    midterm figures
+├── make_final_figures.py              final-report figures
+│
+├── models/
+│   ├── baseline_majority.py
+│   ├── tfidf_logreg.py
+│   ├── structured_features.py
+│   ├── distilbert_model.py
+│   ├── distilbert_finetune.py            ← per-comment, [CLS] head, no pooling
+│   ├── distilbert_finetune_movie.py      ← movie-level, [CLS] head
+│   ├── longformer_finetune.py            ← long-context variant (untested at scale)
+│   ├── tune_and_ensemble.py
+│   ├── compare_all.py
+│   └── add_mae_metric.py                 ← ordinal MAE metric
+│
+└── analysis/
+    ├── temporal_ablation.py
+    ├── expectation_reality.py
+    └── error_analysis.py
+```
+
+`data/`, `results/`, and `report_figures/` are **not committed** — regenerate them via the scripts. This keeps the repo lean and forces reproducibility.
+
+---
+
+## Acknowledgments
+
+This is the final-branch deliverable for **CS505 (Boston University)**. All transformer experiments use the [Hugging Face](https://huggingface.co/) `transformers` library; classical models use [scikit-learn](https://scikit-learn.org/); sentiment scoring uses [VADER](https://github.com/cjhutto/vaderSentiment).
+
+API keys are read from environment variables — never commit your `.env` file. If you push to a public repo with keys hard-coded, rotate them immediately.
