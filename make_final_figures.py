@@ -52,34 +52,48 @@ def mae_from_cm(cm):
     return float((cm * w).sum() / max(cm.sum(), 1))
 
 
+def adj_acc_from_cm(cm, tol=1):
+    cm = np.array(cm, dtype=float)
+    n = cm.shape[0]
+    mask = np.abs(np.arange(n)[:, None] - np.arange(n)[None, :]) <= tol
+    return float((cm * mask).sum() / max(cm.sum(), 1))
+
+
 metrics = load_metrics()
 
-# Inject MAE if missing (for older runs)
+# Inject MAE / adjacent accuracy from confusion matrices (some saved runs
+# predate these metrics).
 for name, m in metrics:
-    if "mae" not in m and "confusion_matrix" in m:
-        m["mae"] = round(mae_from_cm(m["confusion_matrix"]), 4)
+    if "confusion_matrix" in m:
+        if "mae" not in m:
+            m["mae"] = round(mae_from_cm(m["confusion_matrix"]), 4)
+        if "adjacent_accuracy" not in m:
+            m["adjacent_accuracy"] = round(adj_acc_from_cm(m["confusion_matrix"]), 4)
 
 names = [m[0] for m in metrics]
 acc = [m[1].get("accuracy", 0) for m in metrics]
+adj = [m[1].get("adjacent_accuracy", 0) for m in metrics]
 f1 = [m[1].get("macro_f1", 0) for m in metrics]
 mae = [m[1].get("mae", 0) for m in metrics]
 
-fig, ax = plt.subplots(figsize=(7.5, 3.2))
+fig, ax = plt.subplots(figsize=(8.5, 3.4))
 x = np.arange(len(names))
-w = 0.27
-b1 = ax.bar(x - w, acc, w, label="Accuracy ↑", color="#4a6fa5", edgecolor="white")
-b2 = ax.bar(x,     f1,  w, label="Macro F1 ↑", color="#c97b4a", edgecolor="white")
-b3 = ax.bar(x + w, [m / 4 for m in mae], w, label="MAE / 4 ↓", color="#7a7a7a", edgecolor="white")
-ax.set_xticks(x); ax.set_xticklabels(names, rotation=0, fontsize=7.5)
+w = 0.21
+b1 = ax.bar(x - 1.5*w, acc, w, label="Accuracy ↑",          color="#4a6fa5", edgecolor="white")
+b2 = ax.bar(x - 0.5*w, adj, w, label="Adj. Acc (±1) ↑",     color="#6fb56f", edgecolor="white")
+b3 = ax.bar(x + 0.5*w, f1,  w, label="Macro F1 ↑",          color="#c97b4a", edgecolor="white")
+b4 = ax.bar(x + 1.5*w, [m / 4 for m in mae], w, label="MAE / 4 ↓", color="#7a7a7a", edgecolor="white")
+ax.set_xticks(x); ax.set_xticklabels(names, rotation=0, fontsize=7)
 ax.set_ylabel("Score")
-ax.set_ylim(0, 0.55)
+ax.set_ylim(0, 0.85)
 ax.set_title("Test-set performance across all model variants (5-class task)", fontsize=10)
-ax.legend(frameon=False, fontsize=8, loc="upper right")
-for bars in (b1, b2):
-    for b in bars:
-        if b.get_height() > 0:
-            ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.005,
-                    f"{b.get_height():.2f}", ha="center", fontsize=6.5)
+ax.legend(frameon=False, fontsize=7.5, loc="upper right", ncol=4)
+# Annotate the two ordinal-metric winners only (figure stays readable)
+for b in b2:
+    if b.get_height() > 0.6:  # the >0.6 ones are the salient adjacent-acc bars
+        ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.01,
+                f"{b.get_height():.2f}", ha="center", fontsize=6.5,
+                color="#1a4a1a", fontweight="bold")
 plt.tight_layout()
 plt.savefig(f"{OUT_DIR}/fig_final_comparison.png", bbox_inches="tight")
 plt.close()
