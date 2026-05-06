@@ -36,7 +36,9 @@
 % ---- Manual title block (centered) ----
 \begin{center}
 {\Large\bfseries Predicting Post-Release Letterboxd Ratings\\
-from Pre-Release YouTube Trailer Comments}\\
+from Pre-Release YouTube Trailer Comments\footnote{Code and reproduction
+instructions: \url{https://github.com/jonahr4/CS505-Final-Project} (branch
+\texttt{final-branch}).}}\\
 \vspace{4pt}{\large\itshape Final Report}\\
 \vspace{8pt}
 {Jigar Kanakhara \quad Bhavya Bavissi \quad Jonah Rothman}\\
@@ -64,8 +66,6 @@ from Pre-Release YouTube Trailer Comments}\\
 \paragraph{Contributions.} (i) A reproducible 173-movie dataset with strict pre-release filtering. (ii) Six-model comparison covering lexical, hand-engineered, frozen-transformer, and two fine-tuned-transformer regimes. (iii) Adoption of mean absolute label distance (MAE) alongside accuracy and macro F1 to capture the ordinal structure of the buckets. (iv) Per-window temporal ablation showing late-stage comments dominate. (v) An expectation--reality analysis correlating pre-release hype with post-release ratings, with named outliers.
 
 \paragraph{Updates since the midterm.} Per reviewer feedback we (a) implemented end-to-end fine-tuning with a [CLS] head (no pooling) for two distinct setups, (b) added MAE as an ordinal-aware metric for every model, (c) ran a per-window temporal ablation, and (d) added the expectation--reality and error-analysis sections.
-
-\paragraph{Code.} All scripts, the fine-tuning code, and reproduction instructions are at \url{https://github.com/jonahr4/CS505-Final-Project} (branch \texttt{final-branch}).
 
 \section{Related Work}
 \noindent Sentiment-driven prediction of film outcomes has a long lineage. \cite{pang2002} showed bag-of-words classifiers compete with more complex methods, especially in low-data regimes---a finding our results echo. \cite{asur2010} used Twitter to forecast opening-weekend revenue, but Letterboxd ratings track \emph{long-run audience quality} rather than first-weekend revenue.
@@ -146,11 +146,12 @@ Bucket & Score range & Label & $n$\\
 \paragraph{Ensemble.} We average class-probability outputs from TF-IDF, structured-LR, and fine-tuned movie-level DistilBERT.
 
 \section{Experimental Setup}
-\noindent We split at the movie level to prevent comment-level leakage: 121 train / 26 val / 26 test, stratified by rating bucket, seed 42. We report three metrics on the held-out test set:
+\noindent We split at the movie level to prevent comment-level leakage: 121 train / 26 val / 26 test, stratified by rating bucket, seed 42. We report four metrics on the held-out test set:
 \begin{itemize}
-\item \textbf{Accuracy} ($\uparrow$) -- fraction of movies with the exact correct bucket.
-\item \textbf{Macro F1} ($\uparrow$) -- our primary metric; weights all classes equally.
-\item \textbf{Mean absolute label distance / MAE} ($\downarrow$) -- per midterm reviewer feedback. Treats the problem as ordinal: predicting \textit{great} when the truth is \textit{good} is penalized less than \textit{bad}. Computed as $\sum_{i,j} M_{ij}\cdot|i-j| / \sum_{i,j} M_{ij}$ over the confusion matrix $M$. A random uniform predictor on 5 classes has MAE $=1.6$; the worst case is $4.0$.
+\item \textbf{Accuracy} ($\uparrow$) -- fraction of movies with the \emph{exact} correct bucket.
+\item \textbf{Adjacent accuracy} ($\uparrow$) -- fraction of movies whose predicted bucket is within $\pm 1$ of the true bucket. Captures the ordinal nature of the rating scale: predicting \textit{good} when the truth is \textit{great} is treated as substantively close. A random uniform predictor on 5 classes scores 0.52.
+\item \textbf{Macro F1} ($\uparrow$) -- our primary granular metric; weights all classes equally.
+\item \textbf{Mean absolute label distance / MAE} ($\downarrow$) -- per midterm reviewer feedback. Computed as $\sum_{i,j} M_{ij}\cdot|i-j| / \sum_{i,j} M_{ij}$ over the confusion matrix $M$. A random uniform predictor has MAE $=1.6$; the worst case is $4.0$.
 \end{itemize}
 
 \section{Results}
@@ -160,21 +161,22 @@ Bucket & Score range & Label & $n$\\
 \begin{Figure}
 \centering
 \small
-\begin{tabular}{lrrr}
+\begin{tabular}{lrrrr}
 \toprule
-Model & Acc.\ $\uparrow$ & Macro F1 $\uparrow$ & MAE $\downarrow$\\
+Model & Acc & Adj.\ Acc & F1 & MAE \\
+ & $\uparrow$ & $\uparrow$ & $\uparrow$ & $\downarrow$ \\
 \midrule
-Majority baseline                  & 0.231 & 0.075 & 1.77\\
-\textbf{TF-IDF + LR}               & \textbf{0.423} & \textbf{0.401} & 1.19\\
-Structured + LR                    & 0.385 & 0.364 & 1.31\\
-Structured + RF                    & 0.269 & 0.251 & 1.58\\
-DistilBERT (frozen) + LR           & 0.192 & 0.188 & 1.77\\
-DistilBERT FT (per-comment)        & 0.231 & 0.174 & 1.65\\
-DistilBERT FT (movie-level)        & 0.269 & 0.161 & \textbf{1.27}\\
-Ensemble (soft vote)               & 0.269 & 0.274 & 1.46\\
+Majority baseline                  & 0.231 & 0.462 & 0.075 & 1.77\\
+\textbf{TF-IDF + LR}               & \textbf{0.423} & 0.615 & \textbf{0.401} & 1.19\\
+Structured + LR                    & 0.385 & 0.577 & 0.364 & 1.31\\
+Structured + RF                    & 0.269 & 0.500 & 0.251 & 1.58\\
+DistilBERT (frozen) + LR           & 0.192 & 0.423 & 0.188 & 1.77\\
+DistilBERT FT (per-comment)        & 0.231 & 0.500 & 0.174 & 1.65\\
+DistilBERT FT (movie-level)        & 0.269 & \textbf{0.692} & 0.161 & \textbf{1.27}\\
+Ensemble (soft vote)               & 0.269 & 0.577 & 0.274 & 1.46\\
 \bottomrule
 \end{tabular}
-\captionof{table}{Five-class test results across all six model variants plus the ensemble. TF-IDF + LR wins on accuracy and macro F1; movie-level fine-tuned DistilBERT wins on MAE.}
+\captionof{table}{Five-class test results. TF-IDF + LR wins on accuracy and macro F1; movie-level fine-tuned DistilBERT wins on the two ordinal metrics (adjacent accuracy and MAE). Adjacent accuracy ($\pm1$ bucket) reads more naturally than strict accuracy: TF-IDF lands within one bucket of truth on 61.5\% of test movies.}
 \label{tab:5class}
 \end{Figure}
 
@@ -262,7 +264,7 @@ Middle only         & 0.308 & 0.287 & 1.50\\
 
 \paragraph{Why TF-IDF wins.} On 121 training movies with $\sim$13M characters of concatenated text per movie, lexical features are a near-perfect match for the regime: TF-IDF \emph{processes the entire text}, while a transformer is constrained by its context window (DistilBERT sees $\approx$2K of $\approx$100K characters). Movie-title and brand tokens (\textit{kraven, borderlands, snake eyes} for \textit{bad}; \textit{a24, dune, wes anderson, pixar} for \textit{great}) are heavily weighted. Removing the 5 most frequent capitalized proper nouns dropped macro F1 by $\approx$0.05, showing that title-token memorization is a real but partial driver---temporal-sentiment, hype, and engagement features still carry independent signal.
 
-\paragraph{Why fine-tuning did not help.} The per-comment fine-tune suffers heavy pseudo-label noise: a sarcastic or off-topic comment under a \textit{great} movie still inherits the \textit{great} label. Train accuracy reached 0.975 while val macro F1 plateaued at 0.10, the textbook overfit signature. The movie-level fine-tune trades pseudo-label noise for tiny $n$ (121 examples for a 66M-parameter model). Best val F1 was reached at epoch 1 and never recovered; the 512-token context covers only $\sim$2\% of each movie's text. The movie-level variant achieves the best test MAE (1.27) of any model: even when wrong, its predictions are close to the truth---a real ordinal-quality win that 5-class accuracy hides.
+\paragraph{Why fine-tuning did not help.} The per-comment fine-tune suffers heavy pseudo-label noise: a sarcastic or off-topic comment under a \textit{great} movie still inherits the \textit{great} label. Train accuracy reached 0.975 while val macro F1 plateaued at 0.10, the textbook overfit signature. The movie-level fine-tune trades pseudo-label noise for tiny $n$ (121 examples for a 66M-parameter model). Best val F1 was reached at epoch 1 and never recovered; the 512-token context covers only $\sim$2\% of each movie's text. \emph{However}, the movie-level variant achieves the best test MAE (1.27) and adjacent accuracy (0.692) of any model: even when its bucket prediction is wrong, it is rarely far wrong---a real ordinal-quality win that strict 5-class accuracy hides but adjacent accuracy surfaces.
 
 \paragraph{Why ensembles did not help.} The soft-vote ensemble underperformed TF-IDF alone because DistilBERT's poorly calibrated probabilities pulled the average toward the wrong class.
 
