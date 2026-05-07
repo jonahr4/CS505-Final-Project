@@ -27,7 +27,7 @@ Can pre-release YouTube trailer comments predict how a movie is eventually rated
 - **Three evaluation metrics**: accuracy, macro F1, and *mean absolute label distance* (MAE — added per midterm reviewer feedback because the 5-class task is ordinal, not nominal).
 - **All three "novel components"** from the proposal implemented and quantified:
   - **Temporal modeling** → per-window ablation shows the *late* window dominates.
-  - **Expectation–reality gap** → a hand-crafted hype/negativity signal correlates positively with actual ratings (Pearson r = 0.27).
+  - **Expectation–reality gap** → a hand-crafted hype/negativity signal correlates positively with actual ratings (Pearson r = 0.28).
   - **Credibility-weighted aggregation** → like-weighted VADER sentiment.
 - **Reproducible**: every stochastic step uses seed=42; the YouTube/Letterboxd scrapers are checkpointed and resume from quota exhaustion.
 - **Honest negative result**: end-to-end DistilBERT fine-tuning (per-comment AND movie-level) does **not** beat TF-IDF at n=121 train movies — but movie-level fine-tuning achieves the best **MAE** of any model (predictions are closer to truth even when wrong).
@@ -73,7 +73,7 @@ The **late** pre-release window matches or exceeds the full feature set on every
 
 `hype_minus_neg` (fraction of hype phrases minus fraction of negative-anticipation phrases) vs. actual rating bucket:
 
-- **Pearson correlation: r = 0.27, Spearman ρ = 0.24** — positive but noisy.
+- **Pearson correlation: r = 0.28, Spearman ρ = 0.32** — positive but noisy.
 - **Over-hyped flops** (high hype, low rating): *Disenchanted, The Prom, After Ever Happy, Halloween Ends*
 - **Sleeper hits** (low hype, high rating): *Wicked Little Letters, Dungeons & Dragons: Honor Among Thieves, Challengers, The Fall Guy*
 
@@ -169,6 +169,8 @@ expand_to_200.py
 
 ## How to reproduce
 
+> **Note on the dataset.** The `data/` directory (raw scraped YouTube comments and Letterboxd ratings, ~236K comments across 173 movies) is **not committed to the repo**. This is intentional, for two reasons: (1) size and (2) YouTube's terms of service discourage redistributing scraped comment text. The full dataset can be regenerated end-to-end from the scripts below using a free TMDB key and a free YouTube Data API v3 key. All `results/*/results.json` confusion matrices that back the numbers in the report are similarly regeneratable. If a grader needs a frozen snapshot of the dataset for spot-checking, contact the authors and we'll share it directly.
+
 ### 1. Setup
 
 ```bash
@@ -257,11 +259,11 @@ Letterboxd ratings cluster narrowly (mean 3.0, std 0.63). Equal-width 5 bins →
 
 | Bucket | Range | Label | n |
 |---|---|---|---:|
-| 0 | r < 2.3 | bad | 22 |
-| 1 | 2.3 ≤ r < 2.75 | mediocre | 21 |
-| 2 | 2.75 ≤ r < 3.15 | average | 30 |
-| 3 | 3.15 ≤ r < 3.5 | good | 25 |
-| 4 | r ≥ 3.5 | great | 29 |
+| 0 | r < 2.3 | bad | 26 |
+| 1 | 2.3 ≤ r < 2.75 | mediocre | 28 |
+| 2 | 2.75 ≤ r < 3.15 | average | 39 |
+| 3 | 3.15 ≤ r < 3.5 | good | 36 |
+| 4 | r ≥ 3.5 | great | 44 |
 
 ### Movie-level split, not comment-level
 
